@@ -1,0 +1,100 @@
+trigger: none
+
+pool:
+  vmImage: "ubuntu-20.04"
+
+parameters:
+  - name: environment
+    values:
+      - Public-NonProd
+
+variables:
+  - name: AzureLocation
+    value: westeurope
+
+  # Default value for DeploymentServiceConnectionName, will be overwriten with the branch value.
+  # But is needed if you want to select stages when running the pipeline
+  - name: DeploymentServiceConnectionName
+    value: 'spn-foundations-dexmach-001'
+
+  - ${{ if eq(parameters.environment, 'Public-NonProd') }}:
+    - name: ManagementGroupId
+      value: 01a4edc0-c130-4e09-bfd4-7b7de34700e6 #eesc_platform_connectivity_01
+    - name: DeploymentServiceConnectionName
+      value: 'spn-foundations-dexmach-001'
+    - name: Environment
+      value: prd                                                                                         
+
+stages:
+  - stage: Build
+    displayName: Build Bicep template and parameter file
+    jobs:
+      - job: InputValidationAndPackaging
+        displayName: Verifying and packaging ARM template code
+        steps:
+          - script: |
+              az bicep build --file Main.bicep
+            name: BuildBicepFile
+            displayName: Build Bicep file
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: $(DeploymentServiceConnectionName)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az extension add --name managementpartner -y
+                if [[ $(az managementpartner show ) ]]; then
+                    echo "Updating partner ID.."
+                    az managementpartner update --partner-id 4973165
+                else
+                    echo "Setting new partner ID.."
+                    az managementpartner create --partner-id 4973165
+                fi            
+
+  - stage: Validate
+    displayName: Perform validation of template deployment
+    dependsOn:
+    - Build
+    jobs:
+    - job: ValidateDeployment
+      displayName: Validation of the deployment
+      steps:
+      - checkout: none
+      - download: current
+        name: GetArtifact
+        displayName: Get artifact
+        artifact: startingtemplates
+      - task: AzureResourceManagerTemplateDeployment@3
+        inputs:
+          deploymentScope: 'Management Group'
+          azureResourceManagerConnection: $(DeploymentServiceConnectionName)
+          location: $(AzureLocation)
+          templateLocation: Linked artifact
+          csmFile: './Main.bicep'
+          csmParametersFile: './Main-Parameters-$(Environment).bicepparam'
+          deploymentMode: Validation
+
+  - stage: DeployInfrastructure
+    displayName: Deployment of the infrastructure
+    dependsOn:
+      - Build
+      - Validate
+    jobs:
+      - job: Deploy
+        displayName: 'Deploy'
+        steps:
+          - checkout: none
+          - download: current
+            name: GetArtifact
+            displayName: Get artifact
+            artifact: startingtemplates          
+          - task: AzureResourceManagerTemplateDeployment@3
+            displayName: Deploy infrastructure
+            inputs:
+              deploymentScope: 'Management Group'
+              azureResourceManagerConnection: $(DeploymentServiceConnectionName)
+              location: $(AzureLocation)
+              templateLocation: Linked artifact
+              csmFile: './Main.bicep'
+              csmParametersFile: './Main-Parameters-$(Environment).bicepparam'
+              deploymentMode: 'Incremental'
